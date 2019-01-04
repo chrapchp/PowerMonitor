@@ -17,12 +17,21 @@
 
 #include <Arduino.h>
 #include <string.h>
-#include <Time.h>
+#include <TimeLib.h>
 #include <LCD4Bit.h>
-#include <ModbusRtu.h>
+
 #include <RunningMedian.h> // https://github.com/RobTillaart/Arduino/tree/master/libraries/RunningMedian
 // #include <MemoryFree.h>
 #include <Streaming.h>
+
+#if defined(MODBUS_IP)
+
+#include <Ethernet.h>
+  #include <MgsModbus.h> // cchange memory size here
+
+#else // if defined(MODBUS_IP)
+  #include <ModbusRtu.h>
+#endif // if defined(MODBUS_IP)
 
 #include <ACSignal.h>
 #include <PowerSignal.h>
@@ -31,6 +40,29 @@
 #include <DA_DiscreteInput.h>
 #include <DA_NonBlockingDelay.h>
 
+
+
+
+#if defined(MODBUS_IP)
+MgsModbus slave;
+  #define modbusRegisters slave.MbData
+  #define DEFAULT_IP_ADDRESS 192, 168, 1, 85
+  #define DEFAULT_GATEWAY 192, 168, 1, 254
+  #define DEFAULT_SUBNET_MASK 255, 255, 255, 0
+  #define DEFAULT_MAC_ADDRESS 0xDE, 0xAD, 0xBE, 0x00, 0x01, 0xFD
+IPAddress defaultIP(DEFAULT_IP_ADDRESS);
+IPAddress defaultGateway(DEFAULT_GATEWAY);
+IPAddress defaultSubnet(DEFAULT_SUBNET_MASK);
+byte defaultMAC[] = { DEFAULT_MAC_ADDRESS };
+#else // if defined(MODBUS_IP)
+#define MODBUS_REG_COUNT 50
+#define MB_SLAVE_ID                     1
+#define MB_SERIAL_PORT                  0
+#define MB_SERIAL_BAUD                  19200
+#define MB_MAX_REGISTERS 35 // maximum Modbus registers
+uint16_t modbusRegisters[MODBUS_REG_COUNT];
+Modbus   slave(MB_SLAVE_ID, MB_SERIAL_PORT);
+#endif // if defined(MODBUS_IP)
 
 
 // forward declarations
@@ -112,9 +144,6 @@ void onPowerCalc();
 #define SAMPLING_INTERVAL         50 // milli-seconds
 
 
-
-
-
 // Reset totalizers at 12:00 midnight every day
 #define HOUR_RESET   0
 #define MINUTE_RESET 0
@@ -135,15 +164,6 @@ union
 }
 blconvert;
 
-#define MODBUS_REG_COUNT 50
-#define MB_SLAVE_ID                     1
-#define MB_SERIAL_PORT                  0
-#define MB_SERIAL_BAUD                  19200
-#define MB_MAX_REGISTERS 35          // maximum Modbus registers
-uint16_t modbusRegisters[MODBUS_REG_COUNT];
-
-Modbus slave(MB_SLAVE_ID, MB_SERIAL_PORT);
-
 
 DA_AnalogInput TI_001             = DA_AnalogInput(5, 0.0, 1023.0);
 RunningMedian  TI_001MedianFilter = RunningMedian(5);
@@ -151,7 +171,8 @@ RunningMedian  TI_001MedianFilter = RunningMedian(5);
 DA_DiscreteInput LS_001 = DA_DiscreteInput(4,
                                            DA_DiscreteInput::FallingEdgeDetect,
                                            false);
-DA_NonBlockingDelay powerCalcTmr = DA_NonBlockingDelay(5000, onPowerCalc );
+DA_NonBlockingDelay powerCalcTmr = DA_NonBlockingDelay(5000, onPowerCalc);
+
 // create object to control an LCD.
 // number of lines in display=1
 
@@ -216,6 +237,9 @@ char* poor_ftoa(char *a_buffer, float a_number, int a_decimals)
 
 void setup()
 {
+
+
+
   lcd.init();
 
 
@@ -224,11 +248,19 @@ void setup()
   LS_001.setPollingInterval(250);  // ms
   TI_001.setPollingInterval(2500); // ms
 
-    #ifndef DEBUGPWR
+
+    #if defined(MODBUS_IP)
+
+  Ethernet.begin(defaultMAC, defaultIP, defaultGateway, defaultSubnet);
+
+  #else // if defined(MODBUS_IP)
+
   slave.begin(MB_SERIAL_BAUD);
-#else // ifndef DEBUGPWR
-  Serial.begin(9600);
-#endif // ifndef DEBUGPWR
+  #endif // if defined(MODBUS_IP)
+
+  Serial.begin( 9600);
+  Serial << "hello from " << Ethernet.localIP() << endl;
+
 
 
   // Serial.println("Start");
@@ -237,25 +269,33 @@ void setup()
 void loop()
 {
 
-  #ifndef DEBUGPWR
-  refreshModbusRegisters();
+
+
+
+ #if defined(MODBUS_IP)
+  slave.MbsRun();
+
+#else // if defined(MODBUS_IP)
 
   slave.poll(modbusRegisters, MODBUS_REG_COUNT);
-  processModbusCommands();
-  #endif // ifndef DEBUGPWR
-  resetTotalizers();
-
   displayResults();
-
-  TI_001.refresh();
   LS_001.refresh();
-  powerCalcTmr.refresh();
+
+#endif // if defined(MODBUS_IP)
+
+refreshModbusRegisters();
+processModbusCommands();
+
+//resetTotalizers();
+TI_001.refresh();
+powerCalcTmr.refresh();
+
 
 }
 
 void onPowerCalc()
 {
-//  Serial << "pwerCal" << endl;
+  //  Serial << "pwerCal" << endl;
   voltageSignal.beginSampling();
   currentSignalBlack.beginSampling();
   currentSignalRed.beginSampling();
@@ -277,12 +317,11 @@ void onPowerCalc()
   currentSignalRed.endSampling();
   panelBlack.endSampling();
   panelRed.endSampling();
-
-
 }
+
 void LS_001_Callback(bool aValue, int aPin)
 {
-  //Serial << " switch " << endl;
+  // Serial << " switch " << endl;
   g_displayMode++;
 
   if (g_displayMode > MAX_DISPLAY_MODE) g_displayMode = DISPLAY_RMS;
@@ -290,18 +329,20 @@ void LS_001_Callback(bool aValue, int aPin)
 
 void TI_001_Callback(float aValue)
 {
-  //Serial << " temperature:" << aValue * TEMP_CONV << endl;
+  // Serial << " temperature:" << aValue * TEMP_CONV << endl;
   TI_001MedianFilter.add(aValue * TEMP_CONV);
 }
 
 void resetTotalizers()
 {
+
   if ((hour() == HOUR_RESET) && (minute() == MINUTE_RESET) &&
       (second() < SECOND_RESET))
   {
-    panelBlack.resetTotalizers();
+   panelBlack.resetTotalizers();
     panelRed.resetTotalizers();
   }
+
 }
 
 void processModbusCommands()

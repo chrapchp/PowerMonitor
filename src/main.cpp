@@ -258,10 +258,6 @@ void setup()
   slave.begin(MB_SERIAL_BAUD);
   #endif // if defined(MODBUS_IP)
 
-  Serial.begin( 9600);
-  Serial << "hello from " << Ethernet.localIP() << endl;
-
-
 
   // Serial.println("Start");
 }

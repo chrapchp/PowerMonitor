@@ -27,7 +27,7 @@
 #if defined(MODBUS_IP)
 
 #include <Ethernet.h>
-  #include <MgsModbus.h> // cchange memory size here
+#include <MgsModbus.h> // cchange memory size here
 
 #else // if defined(MODBUS_IP)
   #include <ModbusRtu.h>

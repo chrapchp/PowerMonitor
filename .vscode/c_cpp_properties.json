@@ -1,0 +1,75 @@
+//
+// !!! WARNING !!! AUTO-GENERATED FILE!
+// PLEASE DO NOT MODIFY IT AND USE "platformio.ini":
+// https://docs.platformio.org/page/projectconf/section_env_build.html#build-flags
+//
+{
+    "configurations": [
+        {
+            "name": "PlatformIO",
+            "includePath": [
+                "C:/Dev/source/platformIO/projects/PowerMonitor/include",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/src",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/lib/PowerSignal",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/lib/msgModbus",
+                "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/SPI/src",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/lib/LCD4Bit",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/lib/ACSignal",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/.pio/libdeps/uno/Time",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/.pio/libdeps/uno/Streaming/src",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/.pio/libdeps/uno/Modbus-Master-Slave",
+                "C:/Users/chrap/.platformio/packages/framework-arduino-avr/cores/arduino",
+                "C:/Users/chrap/.platformio/packages/framework-arduino-avr/variants/standard",
+                "C:/Dev/source/platformIO/projects/PowerMonitor/.pio/libdeps/uno/Webduino",
+                "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/EEPROM/src",
+                "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/HID/src",
+                "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/SoftwareSerial/src",
+                "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/Wire/src",
+                "C:/Users/chrap/.platformio/packages/tool-unity",
+                ""
+            ],
+            "browse": {
+                "limitSymbolsToIncludedHeaders": true,
+                "path": [
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/include",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/src",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/lib/PowerSignal",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/lib/msgModbus",
+                    "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/SPI/src",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/lib/LCD4Bit",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/lib/ACSignal",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/.pio/libdeps/uno/Time",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/.pio/libdeps/uno/Streaming/src",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/.pio/libdeps/uno/Modbus-Master-Slave",
+                    "C:/Users/chrap/.platformio/packages/framework-arduino-avr/cores/arduino",
+                    "C:/Users/chrap/.platformio/packages/framework-arduino-avr/variants/standard",
+                    "C:/Dev/source/platformIO/projects/PowerMonitor/.pio/libdeps/uno/Webduino",
+                    "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/EEPROM/src",
+                    "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/HID/src",
+                    "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/SoftwareSerial/src",
+                    "C:/Users/chrap/.platformio/packages/framework-arduino-avr/libraries/Wire/src",
+                    "C:/Users/chrap/.platformio/packages/tool-unity",
+                    ""
+                ]
+            },
+            "defines": [
+                "PLATFORMIO=50200",
+                "ARDUINO_AVR_UNO",
+                "F_CPU=16000000L",
+                "ARDUINO_ARCH_AVR",
+                "ARDUINO=10808",
+                "MODBUS_IP",
+                "__AVR_ATmega328P__",
+                ""
+            ],
+            "cStandard": "c11",
+            "cppStandard": "c++11",
+            "compilerPath": "C:/Users/chrap/.platformio/packages/toolchain-atmelavr/bin/avr-gcc.exe",
+            "compilerArgs": [
+                "-mmcu=atmega328p",
+                ""
+            ]
+        }
+    ],
+    "version": 4
+}

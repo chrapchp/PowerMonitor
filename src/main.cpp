@@ -5,6 +5,7 @@
    Average Power, Apparent Power, Reactive Power, Irms, Vrms, Power Factor,
       Power Factor Angle
    Date: Dec. 11, 2009
+         Feb. 20, 2022 - added MQTT, removed LCD support, external button
 
    Line Current is measured using a current transformer from CR Magnetics.
 
@@ -18,19 +19,17 @@
 #include <Arduino.h>
 #include <string.h>
 #include <TimeLib.h>
-#include <LCD4Bit.h>
 
-#include <RunningMedian.h> // https://github.com/RobTillaart/Arduino/tree/master/libraries/RunningMedian
 // #include <MemoryFree.h>
 #include <Streaming.h>
+#include <Ethernet.h>
 
 #if defined(MODBUS_IP)
 
-#include <Ethernet.h>
 #include <MgsModbus.h> // cchange memory size here
 
 #else // if defined(MODBUS_IP)
-  #include <ModbusRtu.h>
+#include <ModbusRtu.h>
 #endif // if defined(MODBUS_IP)
 
 #include <ACSignal.h>
@@ -40,144 +39,103 @@
 #include <DA_DiscreteInput.h>
 #include <DA_NonBlockingDelay.h>
 
-
-
-
-#if defined(MODBUS_IP)
-MgsModbus slave;
-  #define modbusRegisters slave.MbData
-  #define DEFAULT_IP_ADDRESS 192, 168, 1, 85
-  #define DEFAULT_GATEWAY 192, 168, 1, 254
-  #define DEFAULT_SUBNET_MASK 255, 255, 255, 0
-  #define DEFAULT_MAC_ADDRESS 0xDE, 0xAD, 0xBE, 0x00, 0x01, 0xFD
+#define DEFAULT_IP_ADDRESS 192, 168, 1, 85
+#define DEFAULT_GATEWAY 192, 168, 1, 254
+#define DEFAULT_SUBNET_MASK 255, 255, 255, 0
+#define DEFAULT_MAC_ADDRESS 0xDE, 0xAD, 0xBE, 0x00, 0x01, 0xFD
 IPAddress defaultIP(DEFAULT_IP_ADDRESS);
 IPAddress defaultGateway(DEFAULT_GATEWAY);
 IPAddress defaultSubnet(DEFAULT_SUBNET_MASK);
-byte defaultMAC[] = { DEFAULT_MAC_ADDRESS };
-#else // if defined(MODBUS_IP)
-#define MODBUS_REG_COUNT 50
-#define MB_SLAVE_ID                     1
-#define MB_SERIAL_PORT                  0
-#define MB_SERIAL_BAUD                  19200
-#define MB_MAX_REGISTERS 35 // maximum Modbus registers
-uint16_t modbusRegisters[MODBUS_REG_COUNT];
-Modbus   slave(MB_SLAVE_ID, MB_SERIAL_PORT);
-#endif // if defined(MODBUS_IP)
+byte defaultMAC[] = {DEFAULT_MAC_ADDRESS};
 
+#if defined(MODBUS_IP)
+MgsModbus slave;
+#define modbusRegisters slave.MbData
 
-// forward declarations
-float readFilteredTemperature(int   aPin,
-                              float aFilterCoefficient,
-                              float aFilteredValue);
-float readTemperature(int aPin,
-                      int aSamples);
-void  resetTotalizers();
-void  readSetpointsFromMaster();
-void  refreshModbusRegisters();
-void  processModbusCommands();
-void  displayResults();
-void  displayVals(int   aRow,
-                  char *aLabel1,
-                  float aValue1,
-                  char *aLabel2,
-                  float aValue2,
-                  int   aPrecision);
+void readSetpointsFromMaster();
+void refreshModbusRegisters();
+void processModbusCommands();
 
-void TI_001_Callback(float aValue);
-void LS_001_Callback(bool aValue,
-                     int  aPin);
+union
+{
+  unsigned int regsf[2];
+  float val;
+} bfconvert;
+
+union
+{
+  unsigned int regsl[2];
+  long val;
+} blconvert;
+
+#else // MQTT
+#include <PubSubClient.h>
+
+#include <ArduinoJson.h>
+
+#define MQTT_PUBLISH_RATE 30000 // ms
+#define MAX_MSG_OUT_SZ 250
+IPAddress mqtt_server(192, 168, 1, 81);
+String clientID = "power001";
+const char *hostCommandTopic = "power001";
+const char *mqttTopic = "Home/Power/power001/EU";
+char mqttMsgOut[MAX_MSG_OUT_SZ];
+EthernetClient ethClient;
+PubSubClient mqttClient(ethClient);
+StaticJsonDocument<100> mqttMsgIn;
+void onMQTTMessage(char *topic, byte *payload, unsigned int length);
+void onpublishDataTmr();
+void reconnect();
+
+#endif
 
 void onPowerCalc();
 
 // #define DEBUGPWR  // DEBUG
 
-#define LCD_DISPLAY_WIDTH  15
-#define LCD_DEGREE_CHAR 0xF2
+#define CURRENT_BLACK_PIN 2 // current 1st 100 AMP input pin (black )
+#define CURRENT_RED_PIN 3   // current 1st 100 AMP input pin (red )
+#define VOLTAGEPIN 1        // voltage signal input pin
 
+#define DC_OFFSET 2.5 // signal shifted 2.5 above ground
 
-#define CURRENT_BLACK_PIN 2            // current 1st 100 AMP input pin (black )
-#define CURRENT_RED_PIN   3            // current 1st 100 AMP input pin (red )
-#define VOLTAGEPIN 1                   // voltage signal input pin
+#define Te 2011.0   // current transformer effective turns
+                    // ratio from speck sheet
+#define CT_VMAX 2.5 // maximum level shifted voltage from CT
+                    // to input e.g. 7.2 v rms to 2.5 v-pp
+                    // offset
 
-
-#define DC_OFFSET 2.5                  // signal shifted 2.5 above ground
-
-#define Te            2011.0           // current transformer effective turns
-                                       // ratio from speck sheet
-#define CT_VMAX       2.5              // maximum level shifted voltage from CT
-                                       // to input e.g. 7.2 v rms to 2.5 v-pp
-                                       // offset
-
-#define CT_VRATED     10.61891         // Max rated RMS voltage * sqrt(2) of CT
-                                       // from spec sheed
+#define CT_VRATED 10.61891 // Max rated RMS voltage * sqrt(2) of CT
+                           // from spec sheed
 // #define CT_VRATED     7.03239            // Max rated RMS voltage * sqrt(2)
 // of CT from spec sheed
-#define CT_LOAD_RES   151.0            // current transformer load resistor to
-                                       // create a voltage drop
+#define CT_LOAD_RES 151.0 // current transformer load resistor to
+                          // create a voltage drop
 // #define CT_LOAD_RES   100.0               // current transformer load
 // resistor to create a voltage drop
-#define MAX_SAMPLES   2000             // Samples per Calculation
+#define MAX_SAMPLES 2000 // Samples per Calculation
 
-#define PEAK_LINE_VOLTAGE   170        // 120 * sqrt(2)
-#define PEAK_VOLTAGE_TRANSFORMER   2.5 // input to A2D max AC value
+#define PEAK_LINE_VOLTAGE 170        // 120 * sqrt(2)
+#define PEAK_VOLTAGE_TRANSFORMER 2.5 // input to A2D max AC value
 
-#define TEMP_CONV  150. / (1.5 * 1023 / 5)
+#define TEMP_CONV 150. / (1.5 * 1023 / 5)
 
 #define BLACK_INDEX 0 // offsets into array for holding power values
-#define RED_INDEX   1
+#define RED_INDEX 1
 #define MAX_PRECISION 10
 
-
-#define DISPLAY_RMS               1
-#define DISPLAY_REAL_POWER        2 // Real and Apparent
-#define DISPLAY_APPARENT__POWER   3
-#define DISPLAY_POWER_FACTORS     4 // Power Factor
-#define DISPLAY_PFA               5 // Power Factor Angle
-#define DISPLAY_CREST_FACTOR      6 //
-#define DISPLAY_LINE_SPECS        7 // line voltage and crest factor
-#define DISPLAY_C02               8 // Killowatt hour and C02
-#define DISPLAY_TEMPERATURE       9
-#define DISPLAY_TIME              10
-#define MAX_DISPLAY_MODE          10
-
-
-#define SAMPLING_INTERVAL         50 // milli-seconds
-
+#define SAMPLING_INTERVAL 50 // milli-seconds
 
 // Reset totalizers at 12:00 midnight every day
-#define HOUR_RESET   0
+#define HOUR_RESET 0
 #define MINUTE_RESET 0
 #define SECOND_RESET 4
 
+// DA_AnalogInput TI_001 = DA_AnalogInput(5, 0.0, 1023.0);
+// RunningMedian TI_001MedianFilter = RunningMedian(5);
 
-union
-{
-  unsigned int regsf[2];
-  float        val;
-}
-bfconvert;
-
-union
-{
-  unsigned int regsl[2];
-  long         val;
-}
-blconvert;
-
-
-DA_AnalogInput TI_001             = DA_AnalogInput(5, 0.0, 1023.0);
-RunningMedian  TI_001MedianFilter = RunningMedian(5);
-
-DA_DiscreteInput LS_001 = DA_DiscreteInput(4,
-                                           DA_DiscreteInput::FallingEdgeDetect,
-                                           false);
 DA_NonBlockingDelay powerCalcTmr = DA_NonBlockingDelay(5000, onPowerCalc);
-
-// create object to control an LCD.
-// number of lines in display=1
-
-LCD4Bit lcd = LCD4Bit(2);
-
+DA_NonBlockingDelay publishDataTmr = DA_NonBlockingDelay(MQTT_PUBLISH_RATE, onpublishDataTmr);
 
 // ACSignal voltageSignal( VOLTAGEPIN, 1, DC_OFFSET );
 // ACSignal currentSignalBlack( CURRENT_BLACK_PIN, 1, DC_OFFSET );
@@ -186,107 +144,59 @@ ACSignal voltageSignal(VOLTAGEPIN,
                        PEAK_LINE_VOLTAGE / PEAK_VOLTAGE_TRANSFORMER,
                        DC_OFFSET);
 ACSignal currentSignalBlack(CURRENT_BLACK_PIN,
-                            Te / CT_LOAD_RES *CT_VRATED / CT_VMAX,
+                            Te / CT_LOAD_RES * CT_VRATED / CT_VMAX,
                             DC_OFFSET);
 ACSignal currentSignalRed(CURRENT_RED_PIN,
-                          Te / CT_LOAD_RES *CT_VRATED / CT_VMAX,
+                          Te / CT_LOAD_RES * CT_VRATED / CT_VMAX,
                           DC_OFFSET);
 
 PowerSignal panelBlack(voltageSignal, currentSignalBlack);
 PowerSignal panelRed(voltageSignal, currentSignalRed);
 
-
 // PowerSignal panelBlack(voltageSignal, voltageSignal );
 
-int g_displayMode =  MAX_DISPLAY_MODE;
-
-
 time_t gPCtime;
-
-
-// Simplistic Float to Alhpa used for displaying floats on the LCD
-// decimal is good for 1 to 5. no error checks. garbage in - garbage out.
-// problem: number like 1.01 => 1.009 need to look into that later.
-char* poor_ftoa(char *a_buffer, float a_number, int a_decimals)
-{
-  char  l_buffer[MAX_PRECISION + 1];
-  int   l_multiplier;
-  float x;
-
-
-  l_multiplier = 10;
-  x            = a_number - (int)a_number;
-
-  if (x < 0) x *= -1;
-
-  for (int i = 0; i < a_decimals; i++)
-  {
-    x *= l_multiplier;
-
-    l_buffer[i] =  '0' + (int)(x);
-
-    x -= (int)x;
-  }
-  l_buffer[a_decimals] = '\0';
-
-  if (a_decimals > 0) sprintf(a_buffer, "%0d.%s", (int)a_number, l_buffer);
-  else sprintf(a_buffer, "%0d", (int)a_number);
-
-  return a_buffer;
-}
 
 void setup()
 {
 
+#if defined(DEBUG)
+  Serial.begin(9600);
 
+#endif
 
-  lcd.init();
+#if not defined(MODBUS_IP)
+  mqttClient.setBufferSize(MAX_MSG_OUT_SZ);
+  mqttClient.setServer(mqtt_server, 1883);
+  mqttClient.setCallback(onMQTTMessage);
 
-
-  TI_001.setOnPollCallBack(TI_001_Callback);
-  LS_001.setOnEdgeEvent(LS_001_Callback);
-  LS_001.setPollingInterval(250);  // ms
-  TI_001.setPollingInterval(2500); // ms
-
-
-    #if defined(MODBUS_IP)
+#endif
 
   Ethernet.begin(defaultMAC, defaultIP, defaultGateway, defaultSubnet);
-
-  #else // if defined(MODBUS_IP)
-
-  slave.begin(MB_SERIAL_BAUD);
-  #endif // if defined(MODBUS_IP)
-
-
-  // Serial.println("Start");
+  delay(1500);
 }
 
 void loop()
 {
 
-
-
-
- #if defined(MODBUS_IP)
+#if defined(MODBUS_IP)
   slave.MbsRun();
+  refreshModbusRegisters();
+  processModbusCommands();
 
-#else // if defined(MODBUS_IP)
+#else // MQTT
 
-  slave.poll(modbusRegisters, MODBUS_REG_COUNT);
-  displayResults();
-  LS_001.refresh();
+  publishDataTmr.refresh();
+  //  if (!mqttClient.connected()) {
+  //  reconnect();
+  // }
+  mqttClient.loop();
 
-#endif // if defined(MODBUS_IP)
+#endif
 
-refreshModbusRegisters();
-processModbusCommands();
-
-//resetTotalizers();
-TI_001.refresh();
-powerCalcTmr.refresh();
-
-
+  // resetTotalizers();
+  // TI_001.refresh();
+  powerCalcTmr.refresh();
 }
 
 void onPowerCalc()
@@ -315,18 +225,10 @@ void onPowerCalc()
   panelRed.endSampling();
 }
 
-void LS_001_Callback(bool aValue, int aPin)
-{
-  // Serial << " switch " << endl;
-  g_displayMode++;
-
-  if (g_displayMode > MAX_DISPLAY_MODE) g_displayMode = DISPLAY_RMS;
-}
-
 void TI_001_Callback(float aValue)
 {
   // Serial << " temperature:" << aValue * TEMP_CONV << endl;
-  TI_001MedianFilter.add(aValue * TEMP_CONV);
+  // TI_001MedianFilter.add(aValue * TEMP_CONV);
 }
 
 void resetTotalizers()
@@ -335,20 +237,14 @@ void resetTotalizers()
   if ((hour() == HOUR_RESET) && (minute() == MINUTE_RESET) &&
       (second() < SECOND_RESET))
   {
-   panelBlack.resetTotalizers();
+    panelBlack.resetTotalizers();
     panelRed.resetTotalizers();
   }
-
 }
 
+#if defined(MODBUS_IP)
 void processModbusCommands()
 {
-  if (modbusRegisters[30] != 0)
-  {
-    g_displayMode       = modbusRegisters[30];
-    modbusRegisters[30] = 0;
-  }
-
 
   if (modbusRegisters[32] != 0)
   {
@@ -376,239 +272,211 @@ void refreshModbusRegisters()
   // modbusRegisters[ 6 ] = (int) (panelBlack.getDeltaT());
   // modbusRegisters[ 7 ] = (int) (panelRed.getDeltaT());
 
-
   modbusRegisters[8] = (int)(TI_001MedianFilter.getMedian() * 10);
 
-
-  blconvert.val       = (long)(panelBlack.computeAveragePower() * 100.0);
-  modbusRegisters[9]  = blconvert.regsl[0];
+  blconvert.val = (long)(panelBlack.computeAveragePower() * 100.0);
+  modbusRegisters[9] = blconvert.regsl[0];
   modbusRegisters[10] = blconvert.regsl[1];
 
-  blconvert.val       = (long)(panelRed.computeAveragePower() * 100.0);
+  blconvert.val = (long)(panelRed.computeAveragePower() * 100.0);
   modbusRegisters[11] = blconvert.regsl[0];
   modbusRegisters[12] = blconvert.regsl[1];
 
-  blconvert.val       = (long)(panelBlack.computeApparentPower() * 100.0);
+  blconvert.val = (long)(panelBlack.computeApparentPower() * 100.0);
   modbusRegisters[13] = blconvert.regsl[0];
   modbusRegisters[14] = blconvert.regsl[1];
 
-  blconvert.val       = (long)(panelRed.computeApparentPower() * 100.0);
+  blconvert.val = (long)(panelRed.computeApparentPower() * 100.0);
   modbusRegisters[15] = blconvert.regsl[0];
   modbusRegisters[16] = blconvert.regsl[1];
 
-  blconvert.val       = (long)(panelBlack.computeReactivePower() * 100.0);
+  blconvert.val = (long)(panelBlack.computeReactivePower() * 100.0);
   modbusRegisters[17] = blconvert.regsl[0];
   modbusRegisters[18] = blconvert.regsl[1];
 
-  blconvert.val       = (long)(panelRed.computeReactivePower() * 100.0);
+  blconvert.val = (long)(panelRed.computeReactivePower() * 100.0);
   modbusRegisters[19] = blconvert.regsl[0];
   modbusRegisters[20] = blconvert.regsl[1];
 
-  blconvert.val       = (long)(panelBlack.getKiloWattsHrs() * 10000.0);
+  blconvert.val = (long)(panelBlack.getKiloWattsHrs() * 10000.0);
   modbusRegisters[23] = blconvert.regsl[0];
   modbusRegisters[24] = blconvert.regsl[1];
 
-  blconvert.val       = (long)(panelRed.getKiloWattsHrs() * 10000.0);
+  blconvert.val = (long)(panelRed.getKiloWattsHrs() * 10000.0);
   modbusRegisters[25] = blconvert.regsl[0];
   modbusRegisters[26] = blconvert.regsl[1];
 
   modbusRegisters[21] = (int)(panelBlack.computePowerFactor() * 100.0);
   modbusRegisters[22] = (int)(panelRed.computePowerFactor() * 100.0);
 
-
   //    modbusRegisters[ 8 ] = (int) (panelBlack.computePowerFactor() * 100.0);
 }
-
-/*
-   char *timestamptoString(char* aStringBuffer )
-   {
-   sprintf( aStringBuffer, " %d/%d/%d %d:%02d:%02d", day(), month(), year(),
-      hour(), minute(), second() );
-   return( aStringBuffer );
-   }
- */
-void displayResults()
+#else // MQTT
+void onMQTTMessage(char *topic, byte *payload, unsigned int length)
 {
-  char aBuffer[16];
+#ifdef DEBUG
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
 
-  switch (g_displayMode)
+#endif
+}
 
-  // switch(  g_displayMode  )
+void reconnect()
+{
+
+  if (!mqttClient.connected())
   {
-  case DISPLAY_RMS:
-    lcd.cursorTo(1, 0);
-    lcd.printIn("Current (Amps)  ");
-
-    //  displayVals( "I",  currentSignalBlack.getRMSValue() , "A",
-    // "V",voltageSignal.getRMSValue(), "V");
-    displayVals(2,
-                (char *)"B>",
-                currentSignalBlack.getRMSValue(),
-                (char *)"R>",
-                currentSignalRed.getRMSValue(),
-                1);
-
-    //       displayVals( 2, "B>",  1.2,   "R>",  3.4, 1 );
-    break;
-
-  case DISPLAY_REAL_POWER:
-
-    // lcd.clear();
-    lcd.cursorTo(1, 0);
-    lcd.printIn((char *)"Power (Watts)  ");
-    displayVals(2,
-                "B>",
-                panelBlack.computeAveragePower(),
-                "R>",
-                panelRed.computeAveragePower(),
-                0);
-    break;
-
-  case DISPLAY_APPARENT__POWER:
-    lcd.cursorTo(1, 0);
-    lcd.printIn("Apparent PWR(VA)");
-    displayVals(2,
-                "B>",
-                panelBlack.computeApparentPower(),
-                "R>",
-                panelRed.computeApparentPower(),
-                0);
-    break;
-
-  case DISPLAY_POWER_FACTORS:
-    lcd.cursorTo(1, 0);
-    lcd.printIn("PWR Factor      ");
-    displayVals(2,
-                "B>",
-                panelBlack.computePowerFactor(),
-                "R>",
-                panelRed.computePowerFactor(),
-                1);
-    break;
-
-  case DISPLAY_PFA:
-    lcd.cursorTo(1, 0);
-    lcd.printIn("PFA (Degrees)   ");
-    displayVals(2,
-                "B>",
-                panelBlack.computePowerFactorAngle(PS_DEGREES),
-                "R>",
-                panelRed.computePowerFactorAngle(PS_DEGREES),
-                1);
-    break;
-
-  case DISPLAY_CREST_FACTOR:
-    lcd.cursorTo(1, 0);
-    lcd.printIn("Crest Factor    ");
-    displayVals(2,
-                "B>",
-                currentSignalBlack.getCrestFactor(),
-                "R>",
-                currentSignalRed.getCrestFactor(),
-                1);
-    break;
-
-  case DISPLAY_LINE_SPECS:
-    lcd.cursorTo(1, 0);
-    lcd.printIn((char *)"Line Specs      ");
-
-    displayVals(2,
-                "V>",
-                voltageSignal.getRMSValue(),
-                "CF>",
-                voltageSignal.getCrestFactor(),
-                1);
-    break;
-
-  case DISPLAY_C02:
-    lcd.cursorTo(1, 0);
-
-    if (panelBlack.getKiloWattsHrs() < 1.0)
+#ifdef DEBUG
+    Serial << "Attempting MQTT connection..." << endl;
+#endif
+    // Create a random client ID
+    clientID += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (mqttClient.connect(clientID.c_str()))
+    //  if (mqttClient.connect("arduinoClient"))
     {
-      lcd.printIn((char *)"W*hr and CO2-g  ");
-      displayVals(2,
-                  ">",
-                  panelBlack.getKiloWattsHrs() * 1000,
-                  ">",
-                  panelBlack.getCO2Emissions() * 373.2417,
-                  1); // covert to grams
+#ifdef DEBUG
+      Serial << "Connected.." << endl;
+#endif
+      // mqttClient.publish("outTopic", "hello world");
+      mqttClient.subscribe(hostCommandTopic);
     }
     else
     {
-      lcd.printIn("kW*hr & CO2-lbs");
-      displayVals(2,
-                  ">",
-                  panelBlack.getKiloWattsHrs(),
-                  ">",
-                  panelBlack.getCO2Emissions(),
-                  1);
+#ifdef DEBUG
+      Serial << "MQTT Connect failed:(" << mqttClient.state() << ")" << endl;
+#endif
     }
-    break;
-
-  case DISPLAY_TIME:
-
-
-    lcd.cursorTo(1, 0);
-
-    sprintf(aBuffer, "Date: %d/%d/%d", day(), month(), year());
-    lcd.printIn(aBuffer);
-    lcd.cursorTo(2, 0);
-    sprintf(aBuffer, "Time: %d:%02d:%02d ", hour(), minute(), second());
-    lcd.printIn(aBuffer);
-    break;
-
-  case DISPLAY_TEMPERATURE:
-
-
-    lcd.cursorTo(1, 0);
-    lcd.printIn((char *)"Temperature     ");
-    displayVals(2, (char const *)"a>", TI_001MedianFilter.getAverage(),
-                (char const *)"x>", 0, 1);
-
-
-    break;
-
-  default:
-    g_displayMode =  DISPLAY_LINE_SPECS;
-    break;
   }
 }
 
-void displayVals(int   aRow,
-                 char *aLabel1,
-                 float aValue1,
-                 char *aLabel2,
-                 float aValue2,
-                 int   aPrecision)
+/*
+EI-001	Main Voltage RMS
+EIB-001	Main Crest Factor
+II-001	Total Current A
+II-001B	Main Current (Black) A RMS
+II-001R	Main Current (Red) A RMS
+CIB-001B	Main Current (Black) Crest Factor
+CIB-001R	Main Current (Red) Crest Factor
+AIA-001	Total Apparent Power VA
+AIA-001B	Aparent Power (Black)  VA
+AIA-001R	Aparent Power (Red)  VA
+FIF-001	Main  Power Factor
+FIF-001B	Power Factor (Black)
+FIF-001R	Power Factor (Read)
+RII-001	Total Reactive Power var
+RII-001B	Reactive Power (Black)  var
+RII-001R	Reactive Power (Red)  var
+PIR-001	Total Rear Power W
+PIR-001B	Real Power (Black)  W
+PIR-001R	Real Power (Red)  W
+
+
+*/
+void onpublishDataTmr()
 {
-  char l_buffer[LCD_DISPLAY_WIDTH + 1];
 
-  char l_value[15];
-  char l_value2[15];
-  int  l_len;
+  if (!mqttClient.connected())
+  {
+    reconnect();
+  }
 
+  float totalReal = panelBlack.computeAveragePower() + panelRed.computeAveragePower();
+  float totalCurrent = currentSignalBlack.getRMSValue() + currentSignalRed.getRMSValue();
+  float totalApparent = panelBlack.computeApparentPower() + panelRed.computeApparentPower();
+  float totalReactive = panelBlack.computeReactivePower() + panelRed.computeReactivePower();
+  float linePowerFactor = (totalApparent > 0) ? totalReal / totalApparent : 0;
 
-  // fill display buffer with blanks
-  //  memset (l_buffer,'P',LCD_DISPLAY_WIDTH);
+  // sprintf(mqttMsgOut,
+  //         "{\"EI-001\": %.1f, \"EIB-001\":%.1f, \"II-001\":%.1f, \"II-001B\":%.1f,\"II-001R\": %.1f, \"CIB-001B\":%.1f,"
+  //         "\"CIB-001R\":%.1f, \"AIA-001\":%.1f, \"AIA-001B\": %.1f,"
+  //         "\"AIA-001R\":%.1f, \"FIF-001\":%.2f, \"FIF-001B\":%.2f,\"FIF-001R\":%.2f,"
+  //         "\"RII-001\":%.1f, \"RII-001B\":%.1f, \"RII-001R\":%.1f,"
+  //         "\"PIR-001\":%.1f, \"PIR-001B\":%.1f, , \"PIR-001R\":%.1f }",
+  //         voltageSignal.getRMSValue(), voltageSignal.getCrestFactor(), totalCurrent, currentSignalBlack.getRMSValue(), currentSignalRed.getRMSValue(), currentSignalBlack.getCrestFactor(),
+  //         currentSignalRed.getCrestFactor(), totalApparent, panelBlack.computeApparentPower(),
+  //         panelRed.computeApparentPower(), linePowerFactor, panelBlack.computePowerFactor(), panelRed.computePowerFactor(),
+  //         totalReactive, panelBlack.computeReactivePower(), panelRed.computeReactivePower(),
+  //         totalReal, panelBlack.computeAveragePower(), panelRed.computeAveragePower());
 
+  char str_tmp[8];
+  char str_tmp2[8];
+  char str_tmp3[8];
+  char str_tmp4[8];
+  char str_tmp5[8];
+  char str_tmp6[8];
+  char str_tmp7[8];
 
-  // l_buffer[ LCD_DISPLAY_WIDTH + 1  ] = '\0';
-  //     Serial.println( l_buffer );
-  strcpy(l_buffer, "               ");
+  // dtostrf(1.1,4,1, str_tmp);
+  // dtostrf(2.2,3,2, str_tmp2);
+  // dtostrf(3.3,3,1, str_tmp3);
+  // dtostrf(4.4,3,1, str_tmp4);
+  // dtostrf(5.5,3,1, str_tmp5);
+  // dtostrf(6.6,3,2, str_tmp6);
 
+  dtostrf(voltageSignal.getRMSValue(), 4, 1, str_tmp);
+  dtostrf(voltageSignal.getCrestFactor(), 3, 2, str_tmp2);
+  dtostrf(totalCurrent, 3, 1, str_tmp3);
+  dtostrf(currentSignalBlack.getRMSValue(), 3, 1, str_tmp4);
+  dtostrf(currentSignalRed.getRMSValue(), 3, 1, str_tmp5);
+  dtostrf(currentSignalBlack.getCrestFactor(), 3, 2, str_tmp6);
 
-  // lcd.clear();
-  lcd.cursorTo(aRow, 0);
+  sprintf(mqttMsgOut,
+          "{\"EI-001\": %s, \"EIB-001\":%s, \"II-001\":%s, \"II-001B\":%s,\"II-001R\": %s, \"CIB-001B\":%s}",
+          str_tmp, str_tmp2, str_tmp3, str_tmp4, str_tmp5, str_tmp6);
+  mqttClient.publish(mqttTopic, mqttMsgOut);
 
-  poor_ftoa(l_value,  aValue1, aPrecision);
-  poor_ftoa(l_value2, aValue2, aPrecision);
-  sprintf(l_buffer, "%s%s %s%s", aLabel1, l_value, aLabel2, l_value2);
+  dtostrf(currentSignalRed.getCrestFactor(), 3, 2, str_tmp);
+  dtostrf(totalApparent, 5, 1, str_tmp2);
+  dtostrf(panelBlack.computeApparentPower(), 5, 1, str_tmp3);
+  dtostrf(panelRed.computeApparentPower(), 5, 1, str_tmp4);
+  dtostrf(linePowerFactor, 1, 3, str_tmp5);
+  dtostrf(panelBlack.computePowerFactor(), 1, 3, str_tmp6);
+  dtostrf(panelRed.computePowerFactor(), 1, 3, str_tmp7);
 
-  //  ensure blanks fill up to right of display
-  l_len = strlen(l_buffer);
+  // dtostrf(7.7,4,1, str_tmp);
+  // dtostrf(8.8,3,2, str_tmp2);
+  // dtostrf(9.9,3,1, str_tmp3);
+  // dtostrf(10.1,3,1, str_tmp4);
+  // dtostrf(11.1,3,1, str_tmp5);
+  // dtostrf(12.2,3,2, str_tmp6);
+  // dtostrf(13.3,3,2, str_tmp7);
 
-  if (l_len < LCD_DISPLAY_WIDTH) l_buffer[l_len] = ' ';
+  sprintf(mqttMsgOut,
+          "{\"CIB-001R\":%s, \"AIA-001\":%s, \"AIA-001B\": %s,\"AIA-001R\":%s, \"FIF-001\":%s, \"FIF-001B\":%s,\"FIF-001R\":%s}",
+          str_tmp, str_tmp2, str_tmp3, str_tmp4, str_tmp5, str_tmp6, str_tmp7);
+  mqttClient.publish(mqttTopic, mqttMsgOut);
 
+  dtostrf(totalReactive, 4, 1, str_tmp);
+  dtostrf(panelBlack.computeReactivePower(), 4, 1, str_tmp2);
+  dtostrf(panelRed.computeReactivePower(), 4, 1, str_tmp3);
+  dtostrf(totalReal, 5, 1, str_tmp4);
+  dtostrf(panelBlack.computeAveragePower(), 5, 1, str_tmp5);
+  dtostrf(panelRed.computeAveragePower(), 5, 1, str_tmp6);
 
-  lcd.printIn(l_buffer);
+  //         totalReactive, panelBlack.computeReactivePower(), panelRed.computeReactivePower(),
+  //         totalReal, panelBlack.computeAveragePower(), panelRed.computeAveragePower());
+
+  // dtostrf(14.4,4,1, str_tmp);
+  // dtostrf(15.5,3,2, str_tmp2);
+  // dtostrf(16.6,3,1, str_tmp3);
+  // dtostrf(17.7,3,1, str_tmp4);
+  // dtostrf(18.8,3,1, str_tmp5);
+  // dtostrf(19.9,3,2, str_tmp6);
+
+  sprintf(mqttMsgOut,
+          "{\"RII-001\":%s, \"RII-001B\":%s, \"RII-001R\":%s,\"PIR-001\":%s, \"PIR-001B\":%s, \"PIR-001R\":%s }",
+          str_tmp, str_tmp2, str_tmp3, str_tmp4, str_tmp5, str_tmp6);
+  mqttClient.publish(mqttTopic, mqttMsgOut);
+
+#ifdef DEBUG
+  Serial << "MQTT Topic:" << mqttTopic << endl;
+  Serial << "Msg:";
+  // Serial << "MQTT Message:" << mqttMsgOut << endl;
+
+  Serial.println(mqttMsgOut);
+#endif
 }
+
+#endif
